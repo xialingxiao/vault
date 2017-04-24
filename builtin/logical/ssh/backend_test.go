@@ -8,14 +8,15 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"encoding/base64"
+	"errors"
+	"strings"
+
 	"github.com/hashicorp/vault/api"
 	"github.com/hashicorp/vault/logical"
 	logicaltest "github.com/hashicorp/vault/logical/testing"
 	"github.com/hashicorp/vault/vault"
 	"github.com/mitchellh/mapstructure"
-	"errors"
-	"strings"
-	"encoding/base64"
 )
 
 // Before the following tests are run, a username going by the name 'vaultssh' has
@@ -521,6 +522,45 @@ func TestBackend_AbleToRetrievePublicKey(t *testing.T) {
 	logicaltest.Test(t, testCase)
 }
 
+func TestBackend_AbleToAutoGenerateSigningKeys(t *testing.T) {
+
+	config := logical.TestBackendConfig()
+
+	b, err := Factory(config)
+	if err != nil {
+		t.Fatalf("Cannot create backend: %s", err)
+	}
+
+	testCase := logicaltest.TestCase{
+		Backend: b,
+		Steps: []logicaltest.TestStep{
+			logicaltest.TestStep{
+				Operation: logical.UpdateOperation,
+				Path:      "config/ca",
+			},
+
+			logicaltest.TestStep{
+				Operation:       logical.ReadOperation,
+				Path:            "public_key",
+				Unauthenticated: true,
+
+				Check: func(resp *logical.Response) error {
+
+					key := string(resp.Data["http_raw_body"].([]byte))
+
+					if key == "" {
+						return fmt.Errorf("public_key empty. Expected not empty, actual %s", key)
+					}
+
+					return nil
+				},
+			},
+		},
+	}
+
+	logicaltest.Test(t, testCase)
+}
+
 func TestBackend_ValidPrincipalsValidatedForHostCertificates(t *testing.T) {
 	config := logical.TestBackendConfig()
 
@@ -535,10 +575,10 @@ func TestBackend_ValidPrincipalsValidatedForHostCertificates(t *testing.T) {
 			configCaStep(),
 
 			createRoleStep("testing", map[string]interface{}{
-				"key_type": "ca",
+				"key_type":                "ca",
 				"allow_host_certificates": true,
-				"allowed_domains": "example.com,example.org",
-				"allow_subdomains":         true,
+				"allowed_domains":         "example.com,example.org",
+				"allow_subdomains":        true,
 				"default_critical_options": map[string]interface{}{
 					"option": "value",
 				},
@@ -547,7 +587,7 @@ func TestBackend_ValidPrincipalsValidatedForHostCertificates(t *testing.T) {
 				},
 			}),
 
-			signCertificateStep("testing", "root", ssh.HostCert, []string{"dummy.example.org", "second.example.com"}, map[string]string{
+			signCertificateStep("testing", "vault-root-22608f5ef173aabf700797cb95c5641e792698ec6380e8e1eb55523e39aa5e51", ssh.HostCert, []string{"dummy.example.org", "second.example.com"}, map[string]string{
 				"option": "value",
 			}, map[string]string{
 				"extension": "extended",
@@ -578,8 +618,10 @@ func TestBackend_OptionsOverrideDefaults(t *testing.T) {
 			configCaStep(),
 
 			createRoleStep("testing", map[string]interface{}{
-				"key_type": "ca",
-				"allow_user_certificates": true,
+				"key_type":                 "ca",
+				"allowed_users":            "tuber",
+				"default_user":             "tuber",
+				"allow_user_certificates":  true,
 				"allowed_critical_options": "option,secondary",
 				"allowed_extensions":       "extension,additional",
 				"default_critical_options": map[string]interface{}{
@@ -590,7 +632,7 @@ func TestBackend_OptionsOverrideDefaults(t *testing.T) {
 				},
 			}),
 
-			signCertificateStep("testing", "root", ssh.UserCert, nil, map[string]string{
+			signCertificateStep("testing", "vault-root-22608f5ef173aabf700797cb95c5641e792698ec6380e8e1eb55523e39aa5e51", ssh.UserCert, []string{"tuber"}, map[string]string{
 				"secondary": "value",
 			}, map[string]string{
 				"additional": "value",
@@ -629,8 +671,11 @@ func createRoleStep(name string, parameters map[string]interface{}) logicaltest.
 	}
 }
 
-func signCertificateStep(role, keyId string, certType int, validPrincipals []string, criticalOptionPermissions, extensionPermissions map[string]string, ttl time.Duration,
-requestParameters map[string]interface{}) logicaltest.TestStep {
+func signCertificateStep(
+	role, keyId string, certType int, validPrincipals []string,
+	criticalOptionPermissions, extensionPermissions map[string]string,
+	ttl time.Duration,
+	requestParameters map[string]interface{}) logicaltest.TestStep {
 	return logicaltest.TestStep{
 		Operation: logical.UpdateOperation,
 		Path:      "sign/" + role,
@@ -661,10 +706,10 @@ requestParameters map[string]interface{}) logicaltest.TestStep {
 }
 
 func validateSSHCertificate(cert *ssh.Certificate, keyId string, certType int, validPrincipals []string, criticalOptionPermissions, extensionPermissions map[string]string,
-ttl time.Duration) error {
+	ttl time.Duration) error {
 
 	if cert.KeyId != keyId {
-		return fmt.Errorf("Incorrect KeyId: %v", cert.KeyId)
+		return fmt.Errorf("Incorrect KeyId: %v, wanted %v", cert.KeyId, keyId)
 	}
 
 	if cert.CertType != uint32(certType) {
